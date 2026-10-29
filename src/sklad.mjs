@@ -18,7 +18,7 @@ const SEE_HISTORY = [DIRECTOR, MANAGER];
 
 export const DEFAULT_USERS = [
   ["director", "director123", DIRECTOR, "Руководитель"],
-  ["sklad", "sklad123", STOREKEEPER, "Кладовщик"],
+  ["stockman", "sklad123", STOREKEEPER, "Кладовщик"],
   ["manager", "manager123", MANAGER, "Менеджер"],
 ];
 
@@ -233,15 +233,15 @@ export class Store {
 
   async state() {
     const cur = await this.backend.read();
-    if (cur) return cur.data;
+    if (cur) return syncLogins(cur.data);
     await this.tx(() => null); // создаёт начальное состояние
-    return (await this.backend.read()).data;
+    return syncLogins((await this.backend.read()).data);
   }
 
   async tx(fn) {
     for (let attempt = 0; attempt < 15; attempt++) {
       const cur = await this.backend.read();
-      const data = cur ? cur.data : freshState();
+      const data = cur ? syncLogins(cur.data) : freshState();
       const result = await fn(data);
       if (await this.backend.write(data, cur ? cur.etag : null)) return result;
       await new Promise((r) => setTimeout(r, 20 + Math.random() * 80));
@@ -450,6 +450,15 @@ export class Store {
     }
     return makeXlsx(rows);
   }
+}
+
+/** Логины берутся из DEFAULT_USERS: если логин переименовали в коде, уже сохранённые данные подхватят новый. */
+function syncLogins(s) {
+  for (const u of s.users) {
+    const d = DEFAULT_USERS[u.id - 1];
+    if (d && d[2] === u.role) u.login = d[0];
+  }
+  return s;
 }
 
 function userDict(u) { return { id: u.id, login: u.login, role: u.role, name: u.name }; }

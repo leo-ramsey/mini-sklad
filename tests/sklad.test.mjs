@@ -20,7 +20,7 @@ class Client {
   async login(l, p) { const [st] = await this.call("POST", "/api/login", { login: l, password: p }); assert.equal(st, 200); return this; }
 }
 const boss = () => new Client().login("director", "director123");
-const sklad = () => new Client().login("sklad", "sklad123");
+const sklad = () => new Client().login("stockman", "sklad123");
 const mgr = () => new Client().login("manager", "manager123");
 
 async function product(c, name = "Кабель 3×1.5", unit = "m", price = "0,80", currency = "USD") {
@@ -209,7 +209,7 @@ test("перебор паролей: после 5 ошибок логин бло
   const res = await loginAs("director", "director123", "8.8.8.8");
   assert.equal(res.status, 429);
   assert.match((await res.json()).error, /Подождите \d+ мин/);
-  assert.equal((await loginAs("sklad", "sklad123")).status, 200); // другие логины не страдают
+  assert.equal((await loginAs("stockman", "sklad123")).status, 200); // другие логины не страдают
 });
 
 test("перебор с одного IP по разным логинам блокируется", async () => {
@@ -224,7 +224,7 @@ test("пароли из переменных окружения; в строго
   try {
     assert.equal((await loginAs("director", "director123")).status, 401);
     assert.equal((await loginAs("director", "Very-Strong-Secret-42")).status, 200);
-    assert.equal((await loginAs("sklad", "sklad123")).status, 401); // переменной нет → вход закрыт
+    assert.equal((await loginAs("stockman", "sklad123")).status, 401); // переменной нет → вход закрыт
   } finally {
     delete process.env.SKLAD_REQUIRE_ENV_PASSWORDS;
     delete process.env.SKLAD_PASSWORD_DIRECTOR;
