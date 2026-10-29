@@ -1,0 +1,14 @@
+{
+  "name": "mini-sklad",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/"
+  },
+  "dependencies": {
+    "@netlify/blobs": "^11.1.7"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -1,5 +1,3 @@
-sklad.db
-sklad.db-*
-__pycache__/
-*.pyc
+node_modules/
+.netlify/
 .claude/

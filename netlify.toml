@@ -1,0 +1,16 @@
+[build]
+  publish = "public"
+  functions = "netlify/functions"
+
+[dev]
+  framework = "#static"
+  publish = "public"
+
+[functions]
+  node_bundler = "esbuild"
+
+# Любой адрес сайта открывает интерфейс (кроме /api/*, его обслуживает функция)
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
