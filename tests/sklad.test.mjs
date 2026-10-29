@@ -199,6 +199,86 @@ test("ошибки на узбекском", async () => {
   assert.equal((await op(b, "out", pid, "7", "X"))[1].error, "Omborda faqat 0 dona bor.");
 });
 
+// ---------------------------------------------------------------- безопасность
+const loginAs = (login, password, ip = "1.1.1.1") => handle(new Request("http://test/api/login", {
+  method: "POST", headers: { "content-type": "application/json", "x-nf-client-connection-ip": ip },
+  body: JSON.stringify({ login, password }) }), store);
+
+test("перебор паролей: после 5 ошибок логин блокируется, даже с верным паролем", async () => {
+  for (let i = 0; i < 5; i++) assert.equal((await loginAs("director", "wrong" + i, "9.9.9." + i)).status, 401);
+  const res = await loginAs("director", "director123", "8.8.8.8");
+  assert.equal(res.status, 429);
+  assert.match((await res.json()).error, /Подождите \d+ мин/);
+  assert.equal((await loginAs("sklad", "sklad123")).status, 200); // другие логины не страдают
+});
+
+test("перебор с одного IP по разным логинам блокируется", async () => {
+  for (let i = 0; i < 20; i++) await loginAs("user" + i, "x", "6.6.6.6");
+  assert.equal((await loginAs("manager", "manager123", "6.6.6.6")).status, 429);
+  assert.equal((await loginAs("manager", "manager123", "7.7.7.7")).status, 200);
+});
+
+test("пароли из переменных окружения; в строгом режиме стандартные не работают", async () => {
+  process.env.SKLAD_REQUIRE_ENV_PASSWORDS = "1";
+  process.env.SKLAD_PASSWORD_DIRECTOR = "Very-Strong-Secret-42";
+  try {
+    assert.equal((await loginAs("director", "director123")).status, 401);
+    assert.equal((await loginAs("director", "Very-Strong-Secret-42")).status, 200);
+    assert.equal((await loginAs("sklad", "sklad123")).status, 401); // переменной нет → вход закрыт
+  } finally {
+    delete process.env.SKLAD_REQUIRE_ENV_PASSWORDS;
+    delete process.env.SKLAD_PASSWORD_DIRECTOR;
+  }
+});
+
+test("сессия: в базе только хеш токена, после выхода и по истечении срока не работает", async () => {
+  const b = await boss();
+  const token = b.cookie.split("=")[1];
+  const raw = (await store.backend.read()).data;
+  assert.ok(!(token in raw.sessions)); // токен в открытом виде не хранится
+  await b.call("POST", "/api/logout", {});
+  const old = new Client(); old.cookie = "sid=" + token;
+  assert.equal((await old.call("GET", "/api/stock"))[0], 401);
+
+  const c = await boss();
+  const s = (await store.backend.read());
+  for (const v of Object.values(s.data.sessions)) v.exp = Date.now() - 1;
+  await store.backend.write(s.data, s.etag);
+  assert.equal((await c.call("GET", "/api/stock"))[0], 401);
+});
+
+test("поддельный токен и мусор в cookie не пускают", async () => {
+  const c = new Client(); c.cookie = "sid=" + "A".repeat(43);
+  assert.equal((await c.call("GET", "/api/stock"))[0], 401);
+  c.cookie = "sid=" + "x".repeat(5000);
+  assert.equal((await c.call("GET", "/api/stock"))[0], 401);
+});
+
+test("CSRF: запрос с чужого сайта и не-JSON отклоняются", async () => {
+  const b = await boss();
+  const pid = await product(b);
+  const res = await handle(new Request("http://test/api/ops", { method: "POST",
+    headers: { "content-type": "application/json", origin: "https://evil.example", cookie: b.cookie },
+    body: JSON.stringify({ kind: "in", product_id: pid, qty: "1" }) }), store);
+  assert.equal(res.status, 403);
+  const form = await handle(new Request("http://test/api/ops", { method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded", cookie: b.cookie }, body: "kind=in" }), store);
+  assert.equal(form.status, 400);
+  assert.equal((await row(b, pid)).stock, "0");
+});
+
+test("слишком большой запрос отклоняется", async () => {
+  const b = await boss();
+  const [st, r] = await b.call("POST", "/api/products", { name: "x".repeat(30000), unit: "m", price: "1", currency: "USD" });
+  assert.deepEqual([st, r.code], [413, "too_big"]);
+});
+
+test("HTML в названии хранится как текст (защита от XSS на стороне интерфейса)", async () => {
+  const b = await boss();
+  const pid = await product(b, "<img src=x onerror=alert(1)>", "pcs", "1", "USD");
+  assert.equal((await row(b, pid)).name, "<img src=x onerror=alert(1)>");
+});
+
 test("неизвестный адрес и мусор вместо JSON — понятная ошибка, не 500", async () => {
   const b = await boss();
   assert.equal((await b.call("GET", "/api/nope"))[0], 404);

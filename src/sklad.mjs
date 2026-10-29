@@ -25,6 +25,10 @@ export const DEFAULT_USERS = [
 // ---------------------------------------------------------------- сообщения
 const MSG = {
   bad_login: ["Неверный логин или пароль.", "Login yoki parol noto‘g‘ri."],
+  too_many: ["Слишком много неудачных попыток входа. Подождите {min} мин. и попробуйте снова.",
+    "Kirishga juda ko‘p muvaffaqiyatsiz urinish. {min} daqiqa kutib, qayta urinib ko‘ring."],
+  bad_origin: ["Запрос пришёл с чужого сайта и отклонён.", "So‘rov boshqa saytdan kelgan va rad etildi."],
+  too_big: ["Слишком большой запрос.", "So‘rov juda katta."],
   need_login: ["Вы не вошли в систему. Войдите заново.", "Tizimga kirmagansiz. Qaytadan kiring."],
   forbidden: ["У вашей роли нет доступа к этому действию.", "Sizning rolingizda bu amalga ruxsat yo‘q."],
   not_found: ["Не найдено. Обновите страницу.", "Topilmadi. Sahifani yangilang."],
@@ -143,6 +147,61 @@ function cleanText(raw, limit = 500) {
 
 const hashPassword = (pwd, salt) =>
   crypto.pbkdf2Sync(String(pwd), Buffer.from(salt, "hex"), 120000, 32, "sha256").toString("hex");
+const sha256 = (s) => crypto.createHash("sha256").update(String(s)).digest("hex");
+const safeEq = (a, b) => crypto.timingSafeEqual(Buffer.from(a, "hex"), Buffer.from(b, "hex"));
+const DUMMY_SALT = "00".repeat(16);
+
+// ---------------------------------------------------------------- защита входа
+export const SESSION_TTL_MS = 12 * 3600 * 1000;   // сессия живёт 12 часов
+const FAIL_WINDOW_MS = 15 * 60 * 1000;            // окно подсчёта неудачных попыток
+const MAX_FAILS_PER_LOGIN = 5;                     // после 5 ошибок логин блокируется на 15 минут
+const MAX_FAILS_PER_IP = 20;                       // и с одного IP — не больше 20 попыток за 15 минут
+
+/**
+ * Пароль берётся из переменной окружения Netlify SKLAD_PASSWORD_<ЛОГИН> (их не видно в коде и на GitHub).
+ * Если SKLAD_REQUIRE_ENV_PASSWORDS=1, а переменной нет — вход запрещён: стандартные пароли на сайте не работают.
+ * Хеш считается всегда, даже для несуществующего логина, — по времени ответа нельзя угадать логины.
+ */
+function checkPassword(u, password) {
+  const pw = String(password ?? "").slice(0, 200);
+  const computed = hashPassword(pw, u ? u.salt : DUMMY_SALT);
+  if (!u) return false;
+  const envPw = process.env["SKLAD_PASSWORD_" + u.login.toUpperCase()];
+  if (envPw) return safeEq(sha256(pw), sha256(envPw));
+  if (process.env.SKLAD_REQUIRE_ENV_PASSWORDS === "1") return false;
+  return safeEq(computed, u.pass_hash);
+}
+
+function recentFails(s, key, t) {
+  return ((s.fails || {})[key] || []).filter((x) => t - x < FAIL_WINDOW_MS);
+}
+/** Сколько минут ещё ждать (0 — не заблокирован). */
+function lockMinutes(s, login, ip, t) {
+  const waits = [];
+  const byLogin = recentFails(s, "l:" + login.toLowerCase(), t);
+  if (byLogin.length >= MAX_FAILS_PER_LOGIN) waits.push(byLogin[byLogin.length - MAX_FAILS_PER_LOGIN]);
+  if (ip) {
+    const byIp = recentFails(s, "i:" + ip, t);
+    if (byIp.length >= MAX_FAILS_PER_IP) waits.push(byIp[byIp.length - MAX_FAILS_PER_IP]);
+  }
+  if (!waits.length) return 0;
+  return Math.max(1, Math.ceil((Math.max(...waits) + FAIL_WINDOW_MS - t) / 60000));
+}
+function addFail(s, login, ip, t) {
+  s.fails = s.fails || {};
+  for (const key of ["l:" + login.toLowerCase(), ip && "i:" + ip].filter(Boolean)) {
+    s.fails[key] = [...recentFails(s, key, t), t].slice(-50);
+  }
+}
+function pruneSecurity(s, t) {
+  s.fails = s.fails || {};
+  for (const k of Object.keys(s.fails)) if (!recentFails(s, k, t).length) delete s.fails[k];
+  const keys = Object.keys(s.fails);
+  if (keys.length > 2000) keys.slice(0, keys.length - 2000).forEach((k) => delete s.fails[k]);
+  for (const [k, v] of Object.entries(s.sessions)) if (!(v.exp > t)) delete s.sessions[k];
+  const tokens = Object.keys(s.sessions);
+  if (tokens.length > 500) tokens.slice(0, tokens.length - 500).forEach((k) => delete s.sessions[k]);
+}
 
 function now() {
   // Время Ташкента (UTC+5), чтобы история показывала местное время, а не время сервера Netlify.
@@ -191,27 +250,36 @@ export class Store {
   }
 
   // -- авторизация
-  async login(login, password) {
-    return this.tx((s) => {
-      const u = s.users.find((x) => x.login === String(login || "").trim());
-      const ok = u && crypto.timingSafeEqual(Buffer.from(u.pass_hash, "hex"),
-        Buffer.from(hashPassword(password || "", u.salt), "hex"));
-      if (!ok) throw err("bad_login", 401);
+  async login(login, password, ip = "") {
+    const name = String(login ?? "").trim().slice(0, 100);
+    const t0 = Date.now();
+    const s0 = await this.state();
+    const wait = lockMinutes(s0, name, ip, t0);
+    if (wait) throw err("too_many", 429, { min: wait });
+    const u = s0.users.find((x) => x.login === name);
+    const ok = checkPassword(u, password); // тяжёлый хеш — вне транзакции, чтобы не повторять его при конфликте
+    const res = await this.tx((s) => {
+      const t = Date.now();
+      pruneSecurity(s, t);
+      if (!ok) { addFail(s, name, ip, t); return null; }
+      delete s.fails["l:" + name.toLowerCase()];
       const token = crypto.randomBytes(32).toString("base64url");
-      s.sessions[token] = { user_id: u.id, created: now() };
-      const tokens = Object.keys(s.sessions);
-      if (tokens.length > 500) tokens.slice(0, tokens.length - 500).forEach((t) => delete s.sessions[t]);
+      // В базе хранится только хеш токена: даже утечка данных не даст войти чужой сессией.
+      s.sessions[sha256(token)] = { user_id: u.id, exp: t + SESSION_TTL_MS };
       return { token, user: userDict(u) };
     });
+    if (!res) throw err("bad_login", 401);
+    return res;
   }
   async logout(token) {
     if (!token) return;
-    await this.tx((s) => { delete s.sessions[token]; });
+    await this.tx((s) => { delete s.sessions[sha256(token)]; });
   }
   async userByToken(token) {
-    if (!token) return null;
+    if (!token || token.length > 100) return null;
     const s = await this.state();
-    const sess = s.sessions[token];
+    const sess = s.sessions[sha256(token)];
+    if (!sess || !(sess.exp > Date.now())) return null;
     const u = sess && s.users.find((x) => x.id === sess.user_id);
     return u ? userDict(u) : null;
   }
@@ -476,6 +544,8 @@ function zipStore(entries) {
 }
 
 // ---------------------------------------------------------------- HTTP
+const MAX_BODY = 20000; // ни одна форма сайта не отправляет больше
+
 function json(status, payload, headers = {}) {
   return new Response(JSON.stringify(payload), {
     status,
@@ -484,8 +554,11 @@ function json(status, payload, headers = {}) {
   });
 }
 function readCookie(req, name) {
-  const m = new RegExp(`(?:^|;\\s*)${name}=([^;]+)`).exec(req.headers.get("cookie") || "");
-  return m ? decodeURIComponent(m[1]) : null;
+  for (const part of (req.headers.get("cookie") || "").split(";")) {
+    const i = part.indexOf("=");
+    if (i > 0 && part.slice(0, i).trim() === name) return part.slice(i + 1).trim();
+  }
+  return null;
 }
 
 export async function handle(req, store) {
@@ -503,27 +576,39 @@ async function route(req, store) {
   const url = new URL(req.url);
   const path = url.pathname.replace(/\/+$/, "");
   const method = req.method;
-  const secure = url.protocol === "https:" ? "; Secure" : "";
-  if (method !== "GET" && !(req.headers.get("content-type") || "").includes("application/json")) {
-    throw err("bad_json"); // защита от отправки форм с чужих сайтов
+  const https = url.protocol === "https:";
+  // На HTTPS — cookie с префиксом __Host-: браузер не даст её подменить с поддомена или по HTTP.
+  const cookieName = https ? "__Host-sid" : "sid";
+  const cookieAttrs = `Path=/; HttpOnly; SameSite=Strict${https ? "; Secure" : ""}`;
+
+  if (!["GET", "POST", "PUT", "DELETE"].includes(method)) throw err("not_found", 404);
+  if (method !== "GET") {
+    // Защита от CSRF: только JSON и только со своего же сайта.
+    if (!(req.headers.get("content-type") || "").includes("application/json")) throw err("bad_json");
+    const origin = req.headers.get("origin");
+    if (origin && origin !== url.origin) throw err("bad_origin", 403);
   }
   const body = async () => {
     if (method === "GET") return {};
+    if (Number(req.headers.get("content-length") || 0) > MAX_BODY) throw err("too_big", 413);
     let d;
-    try { const t = await req.text(); d = t ? JSON.parse(t) : {}; } catch { throw err("bad_json"); }
+    const t = await req.text();
+    if (t.length > MAX_BODY) throw err("too_big", 413);
+    try { d = t ? JSON.parse(t) : {}; } catch { throw err("bad_json"); }
     if (!d || typeof d !== "object" || Array.isArray(d)) throw err("bad_json");
     return d;
   };
-  const token = readCookie(req, "sid");
+  const token = readCookie(req, cookieName);
 
   if (path === "/api/login" && method === "POST") {
     const d = await body();
-    const { token: t, user } = await store.login(d.login, d.password);
-    return json(200, { user }, { "Set-Cookie": `sid=${t}; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000${secure}` });
+    const ip = req.headers.get("x-nf-client-connection-ip") || "";
+    const { token: t, user } = await store.login(d.login, d.password, ip);
+    return json(200, { user }, { "Set-Cookie": `${cookieName}=${t}; ${cookieAttrs}; Max-Age=${SESSION_TTL_MS / 1000}` });
   }
   if (path === "/api/logout" && method === "POST") {
     await store.logout(token);
-    return json(200, { ok: true }, { "Set-Cookie": `sid=; Path=/; Max-Age=0${secure}` });
+    return json(200, { ok: true }, { "Set-Cookie": `${cookieName}=; ${cookieAttrs}; Max-Age=0` });
   }
 
   const user = await store.userByToken(token);

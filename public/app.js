@@ -155,11 +155,9 @@ function loginView() {
     <div style="display:flex;justify-content:space-between;align-items:center"><div class="logo"><i>▦</i>${t("title")}</div>${langSwitch()}</div>
     <h1>${t("login_h")}</h1><p>${t("login_p")}</p>
     <label class="l" for="lg">${t("login")}</label><input class="f" id="lg" autocomplete="username" autocapitalize="none" required>
-    <label class="l" for="pw">${t("password")}</label><input class="f" id="pw" type="password" autocomplete="current-password" required>
+    <label class="l" for="pw">${t("password")}</label><input class="f" id="pw" type="password" autocomplete="current-password" maxlength="200" required>
     <div class="err" id="lerr"></div>
     <button class="btn btn-pri btn-block" id="lbtn">${t("enter")}</button>
-    <div class="demo">${t("demo")}<br>${t("role_director")}: <code>director</code> / <code>director123</code><br>
-    ${t("role_storekeeper")}: <code>sklad</code> / <code>sklad123</code><br>${t("role_manager")}: <code>manager</code> / <code>manager123</code></div>
   </form></div>`;
 }
 
