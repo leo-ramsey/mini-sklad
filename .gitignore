@@ -1,0 +1,5 @@
+sklad.db
+sklad.db-*
+__pycache__/
+*.pyc
+.claude/
