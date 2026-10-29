@@ -36,6 +36,8 @@ label.l{display:block;font-size:12px;font-weight:600;color:#374151;margin:12px 0
 .login h1{margin:14px 0 4px;font-size:22px}.login p{margin:0 0 8px;color:var(--mut)}
 .logo{display:flex;align-items:center;gap:10px;font-weight:700}
 .logo i{width:30px;height:30px;border-radius:9px;background:linear-gradient(135deg,#4f7bff,#2f5bea);display:grid;place-items:center;font-style:normal;color:#fff;font-size:15px;flex:none}
+.login .btn-block{margin-top:20px}
+.login .err{margin-bottom:0}
 .demo{margin-top:16px;font-size:12px;color:var(--mut);border-top:1px solid var(--line);padding-top:12px}
 .demo code{background:#f1f3f6;padding:1px 5px;border-radius:4px}
 
