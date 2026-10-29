@@ -16,9 +16,9 @@
 
 ## Публикация на Netlify
 
-**Способ 1 — из GitHub (рекомендуется).** Netlify → *Add new site* → *Import an existing project* → GitHub →
-репозиторий `mini-sklad` → *Deploy*. Настройки сборки подтянутся из `netlify.toml` сами.
-После каждого `git push` сайт обновляется автоматически.
+**Способ 1 — из GitHub (так подключено сейчас).** Репозиторий связан с Netlify: каждый `git push` в ветку `main`
+автоматически собирает и публикует сайт. Настройки сборки берутся из `netlify.toml`.
+Для нового сайта: Netlify → *Add new site* → *Import an existing project* → GitHub → репозиторий `mini-sklad` → *Deploy*.
 
 **Способ 2 — из командной строки** (нужен Node.js 18+):
 ```bash
