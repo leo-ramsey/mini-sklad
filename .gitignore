@@ -1,4 +1,6 @@
 node_modules/
 .netlify/
 .claude/
+.env
+data/
 sklad.db*

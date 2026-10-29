@@ -1,6 +1,7 @@
-// Мини-склад: вся бизнес-логика и HTTP-API. Работает в Netlify Functions,
-// данные хранятся одним JSON-документом в Netlify Blobs.
+// Мини-склад: вся бизнес-логика и HTTP-API. Данные хранятся одним JSON-документом (файл на диске).
 import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 
 // Количество хранится в тысячных долях единицы, цена — в сотых (центы/тийины).
 // Только целые числа → никаких ошибок округления (0,10 $ × 3 = ровно 0,30 $).
@@ -158,7 +159,7 @@ const MAX_FAILS_PER_LOGIN = 5;                     // после 5 ошибок 
 const MAX_FAILS_PER_IP = 20;                       // и с одного IP — не больше 20 попыток за 15 минут
 
 /**
- * Пароль берётся из переменной окружения Netlify SKLAD_PASSWORD_<ЛОГИН> (их не видно в коде и на GitHub).
+ * Пароль берётся из переменной окружения SKLAD_PASSWORD_<ЛОГИН> — файл .env рядом с сервером (его нет в коде и на GitHub).
  * Если SKLAD_REQUIRE_ENV_PASSWORDS=1, а переменной нет — вход запрещён: стандартные пароли на сайте не работают.
  * Хеш считается всегда, даже для несуществующего логина, — по времени ответа нельзя угадать логины.
  */
@@ -204,7 +205,7 @@ function pruneSecurity(s, t) {
 }
 
 function now() {
-  // Время Ташкента (UTC+5), чтобы история показывала местное время, а не время сервера Netlify.
+  // Время Ташкента (UTC+5) — одинаковое, в каком бы часовом поясе ни был настроен компьютер.
   const d = new Date(Date.now() + 5 * 3600 * 1000);
   return d.toISOString().replace("T", " ").slice(0, 19);
 }
@@ -570,10 +571,11 @@ function readCookie(req, name) {
   return null;
 }
 
-export async function handle(req, store) {
+/** ctx.ip — адрес клиента из сокета (заголовкам вроде X-Forwarded-For не доверяем: их легко подделать). */
+export async function handle(req, store, ctx = {}) {
   const lang = (req.headers.get("x-lang") || "").toLowerCase() === "uz" ? "uz" : "ru";
   try {
-    return await route(req, store);
+    return await route(req, store, ctx);
   } catch (e) {
     if (e instanceof AppError) return json(e.status, { error: e.text(lang), code: e.key });
     console.error(e);
@@ -581,7 +583,7 @@ export async function handle(req, store) {
   }
 }
 
-async function route(req, store) {
+async function route(req, store, ctx) {
   const url = new URL(req.url);
   const path = url.pathname.replace(/\/+$/, "");
   const method = req.method;
@@ -611,8 +613,7 @@ async function route(req, store) {
 
   if (path === "/api/login" && method === "POST") {
     const d = await body();
-    const ip = req.headers.get("x-nf-client-connection-ip") || "";
-    const { token: t, user } = await store.login(d.login, d.password, ip);
+    const { token: t, user } = await store.login(d.login, d.password, ctx.ip || "");
     return json(200, { user }, { "Set-Cookie": `${cookieName}=${t}; ${cookieAttrs}; Max-Age=${SESSION_TTL_MS / 1000}` });
   }
   if (path === "/api/logout" && method === "POST") {
@@ -651,20 +652,24 @@ async function route(req, store) {
 }
 
 // ---------------------------------------------------------------- хранилища
-const NO_ETAG = "*";
-
-/** Netlify Blobs: один документ "db", запись только если etag не изменился. */
-export function blobsBackend(blobStore) {
+/**
+ * Файл JSON на диске. Запись — только если версия не изменилась с момента чтения (как и в памяти),
+ * а сам файл пишется атомарно: сначала во временный, потом переименование. Сбой посреди записи
+ * не испортит данные — останется либо старая, либо новая версия целиком.
+ */
+export function fileBackend(file) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  let cur = null, v = 0;
+  if (fs.existsSync(file)) cur = { data: JSON.parse(fs.readFileSync(file, "utf8")), etag: String(++v) };
   return {
-    async read() {
-      const r = await blobStore.getWithMetadata("db", { type: "json" });
-      // Локальный эмулятор (netlify dev) не отдаёт etag — там пишем без условия; на Netlify etag есть всегда.
-      return r ? { data: r.data, etag: r.etag || NO_ETAG } : null;
-    },
+    async read() { return cur ? { data: structuredClone(cur.data), etag: cur.etag } : null; },
     async write(data, etag) {
-      const opts = etag === null ? { onlyIfNew: true } : etag === NO_ETAG ? {} : { onlyIfMatch: etag };
-      const r = await blobStore.setJSON("db", data, opts);
-      return r.modified;
+      if ((cur ? cur.etag : null) !== etag) return false;
+      const tmp = `${file}.${process.pid}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(data), { mode: 0o600 });
+      fs.renameSync(tmp, file);
+      cur = { data: structuredClone(data), etag: String(++v) };
+      return true;
     },
   };
 }

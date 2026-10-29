@@ -1,7 +1,10 @@
 // Автотесты: npm test  (или node --test tests/)
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { Store, handle, memoryBackend } from "../src/sklad.mjs";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { Store, handle, memoryBackend, fileBackend } from "../src/sklad.mjs";
 
 let store;
 beforeEach(() => { store = new Store(memoryBackend()); });
@@ -201,8 +204,8 @@ test("ошибки на узбекском", async () => {
 
 // ---------------------------------------------------------------- безопасность
 const loginAs = (login, password, ip = "1.1.1.1") => handle(new Request("http://test/api/login", {
-  method: "POST", headers: { "content-type": "application/json", "x-nf-client-connection-ip": ip },
-  body: JSON.stringify({ login, password }) }), store);
+  method: "POST", headers: { "content-type": "application/json" },
+  body: JSON.stringify({ login, password }) }), store, { ip });
 
 test("перебор паролей: после 5 ошибок логин блокируется, даже с верным паролем", async () => {
   for (let i = 0; i < 5; i++) assert.equal((await loginAs("director", "wrong" + i, "9.9.9." + i)).status, 401);
@@ -277,6 +280,23 @@ test("HTML в названии хранится как текст (защита 
   const b = await boss();
   const pid = await product(b, "<img src=x onerror=alert(1)>", "pcs", "1", "USD");
   assert.equal((await row(b, pid)).name, "<img src=x onerror=alert(1)>");
+});
+
+test("данные в файле сохраняются после перезапуска", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sklad-"));
+  const file = path.join(dir, "data", "sklad.json");
+  try {
+    store = new Store(fileBackend(file));
+    const b = await boss();
+    const pid = await product(b);
+    await op(b, "in", pid, "42");
+    store = new Store(fileBackend(file)); // «перезапуск»: новое хранилище читает тот же файл
+    const b2 = await boss();
+    assert.equal((await row(b2, pid)).stock, "42");
+    assert.deepEqual(fs.readdirSync(path.dirname(file)), ["sklad.json"]); // временных файлов не осталось
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("неизвестный адрес и мусор вместо JSON — понятная ошибка, не 500", async () => {
